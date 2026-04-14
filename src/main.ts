@@ -39,7 +39,7 @@ let renderer: HDRRenderer;
 let rgbData: Float32Array | null = null;
 let imgW = 0, imgH = 0;
 let params: RenderParams = structuredClone(DEFAULT_PARAMS);
-let currentClip = CLIPS[0];
+let currentClip: typeof CLIPS[number] = CLIPS[0];
 let currentFrame = Math.floor(currentClip.frames / 2);
 let loading = false;
 
