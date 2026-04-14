@@ -1,0 +1,586 @@
+import { init, decodeRgbExr } from 'exrs';
+import { HDRRenderer, DEFAULT_PARAMS, type RenderParams } from './renderer';
+import { ColorWheel, computeHistogram, drawHistogram, drawParade } from './widgets';
+import './style.css';
+
+// ── Clip catalog (27 clips) ──────────────────────────────
+const CLIPS = [
+  { id: 'dandelion_girl_sunset',      label: 'Dandelion Girl Sunset',      frames: 97  },
+  { id: 'airport_silhouettes_sunset', label: 'Airport Silhouettes Sunset', frames: 121 },
+  { id: 'ballerina_arch_spotlight',   label: 'Ballerina Arch Spotlight',   frames: 121 },
+  { id: 'ballerina_window_light',     label: 'Ballerina Window Light',     frames: 121 },
+  { id: 'ballerina_window_reach',     label: 'Ballerina Window Reach',     frames: 121 },
+  { id: 'big_ben_tower',              label: 'Big Ben Tower',              frames: 75  },
+  { id: 'boy_cozy_room_moody',        label: 'Boy Cozy Room Moody',        frames: 121 },
+  { id: 'carousel_night_glow',        label: 'Carousel Night Glow',        frames: 121 },
+  { id: 'cathedral_dome_light',       label: 'Cathedral Dome Light',       frames: 121 },
+  { id: 'cattle_meadow_backlit',      label: 'Cattle Meadow Backlit',      frames: 121 },
+  { id: 'city_highway_night',         label: 'City Highway Night',         frames: 121 },
+  { id: 'city_rooftops_aerial',       label: 'City Rooftops Aerial',       frames: 121 },
+  { id: 'city_roundabout_night',      label: 'City Roundabout Night',      frames: 121 },
+  { id: 'dancer_blue_studio',         label: 'Dancer Blue Studio',         frames: 121 },
+  { id: 'dusk_field_clouds',          label: 'Dusk Field Clouds',          frames: 121 },
+  { id: 'forest_stream_golden',       label: 'Forest Stream Golden',       frames: 121 },
+  { id: 'girls_bokeh_picnic',         label: 'Girls Bokeh Picnic',         frames: 57  },
+  { id: 'golden_street_tower',        label: 'Golden Street Tower',        frames: 121 },
+  { id: 'greek_alley_flowers',        label: 'Greek Alley Flowers',        frames: 121 },
+  { id: 'horse_pasture_silhouette',   label: 'Horse Pasture Silhouette',   frames: 121 },
+  { id: 'lakeside_arches_vista',      label: 'Lakeside Arches Vista',      frames: 121 },
+  { id: 'misty_mountains_sunrise',    label: 'Misty Mountains Sunrise',    frames: 121 },
+  { id: 'mountain_road_canyon',       label: 'Mountain Road Canyon',       frames: 121 },
+  { id: 'mountain_sunrise_portrait',  label: 'Mountain Sunrise Portrait',  frames: 121 },
+  { id: 'neon_dancer_club',           label: 'Neon Dancer Club',           frames: 121 },
+  { id: 'night_vendor_cart',          label: 'Night Vendor Cart',          frames: 121 },
+  { id: 'river_cascade_sunlit',       label: 'River Cascade Sunlit',       frames: 121 },
+] as const;
+
+// ── State ────────────────────────────────────────────────
+let renderer: HDRRenderer;
+let rgbData: Float32Array | null = null;
+let imgW = 0, imgH = 0;
+let params: RenderParams = structuredClone(DEFAULT_PARAMS);
+let currentClip = CLIPS[0];
+let currentFrame = Math.floor(currentClip.frames / 2);
+let loading = false;
+
+let wheels: { lift: ColorWheel; gamma: ColorWheel; gain: ColorWheel; offset: ColorWheel };
+let scopeCtx: CanvasRenderingContext2D;
+let scopeMode: 'histogram' | 'parade' = 'histogram';
+let histRafId = 0;
+let lastHistPixels: Uint8Array | null = null;
+
+// SDR compare
+let compareOn = false;
+let wipePos = 0.5;
+
+const $ = <T extends HTMLElement>(s: string) => document.querySelector<T>(s)!;
+
+// ── Boot ─────────────────────────────────────────────────
+async function boot() {
+  await init();
+  renderer = new HDRRenderer($<HTMLCanvasElement>('#canvas'));
+  scopeCtx = $<HTMLCanvasElement>('#scope-canvas').getContext('2d')!;
+
+  const wc = $<HTMLElement>('#wheels-container');
+  const lift   = new ColorWheel(wc, 'Lift',   0.45, 0);
+  const gamma  = new ColorWheel(wc, 'Gamma',  0.50, 1);
+  const gain   = new ColorWheel(wc, 'Gain',   0.30, 1);
+  const offset = new ColorWheel(wc, 'Offset', 0.20, 0);
+  wheels = { lift, gamma, gain, offset };
+  lift.onUpdate   = () => { params.lift   = lift.values;   renderAndHist(); };
+  gamma.onUpdate  = () => { params.gamma  = gamma.values;  renderAndHist(); };
+  gain.onUpdate   = () => { params.gain   = gain.values;   renderAndHist(); };
+  offset.onUpdate = () => { params.offset = offset.values; renderAndHist(); };
+
+  wireToolbar();
+  wireTimeline();
+  wirePanel();
+  wireScopeTabs();
+  wirePanelToggle();
+  wirePanelResize();
+  wireCompare();
+  wirePixelInspector($<HTMLCanvasElement>('#canvas'));
+
+  await loadFrame(currentClip.id, currentFrame);
+}
+
+// ── EXR loading ──────────────────────────────────────────
+// In dev: /clips/ is served by Vite middleware from ../clips/.
+// In prod: Vite injects VITE_CLIP_BASE_URL (e.g. HuggingFace dataset URL).
+const CLIP_BASE = (import.meta.env.VITE_CLIP_BASE_URL ?? '/clips').replace(/\/$/, '');
+
+function frameUrl(clip: string, frame: number) {
+  return `${CLIP_BASE}/${clip}/hdr_exr/frame_${String(frame).padStart(5, '0')}.exr`;
+}
+function sdrUrl(clip: string, frame: number) {
+  return `${CLIP_BASE}/${clip}/sdr_png/frame_${String(frame).padStart(5, '0')}.png`;
+}
+
+async function loadFrame(clip: string, frame: number) {
+  if (loading) return;
+  loading = true;
+  const ov = $<HTMLElement>('.loading');
+  ov.classList.remove('hidden');
+  ov.textContent = 'Loading EXR\u2026';
+  try {
+    const resp = await fetch(frameUrl(clip, frame));
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    ov.textContent = 'Decoding\u2026';
+    await new Promise(r => setTimeout(r, 0));
+    const t0 = performance.now();
+    const dec = decodeRgbExr(buf);
+    const dt = (performance.now() - t0).toFixed(0);
+    rgbData = dec.interleavedRgbPixels;
+    imgW = dec.width; imgH = dec.height;
+    renderer.uploadImage(rgbData, imgW, imgH);
+    renderAndHist();
+    $<HTMLElement>('#info-res').textContent = `${imgW}\u00d7${imgH}`;
+    $<HTMLElement>('#info-decode').textContent = `${dt} ms`;
+    // load SDR counterpart if compare is on
+    if (compareOn) loadSDR(clip, frame);
+  } catch (e) {
+    ov.textContent = `Error: ${(e as Error).message}`;
+    loading = false; return;
+  }
+  ov.classList.add('hidden');
+  loading = false;
+}
+
+// ── .cube LUT parser ─────────────────────────────────────
+function parseCube(text: string): { size: number; data: Float32Array } | null {
+  const lines = text.split(/\r?\n/);
+  let size = 0;
+  const values: number[] = [];
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t || t.startsWith('#') || t.startsWith('TITLE') || t.startsWith('DOMAIN')) continue;
+    if (t.startsWith('LUT_3D_SIZE')) {
+      size = parseInt(t.split(/\s+/)[1], 10);
+      continue;
+    }
+    if (t.startsWith('LUT_1D_SIZE')) return null; // 1D LUTs not supported
+    const parts = t.split(/\s+/);
+    if (parts.length >= 3) {
+      const r = parseFloat(parts[0]), g = parseFloat(parts[1]), b = parseFloat(parts[2]);
+      if (!isNaN(r)) { values.push(r, g, b); }
+    }
+  }
+  if (size < 2 || values.length !== size * size * size * 3) return null;
+  return { size, data: new Float32Array(values) };
+}
+
+function loadSDR(clip: string, frame: number) {
+  const img = new Image();
+  img.onload = () => {
+    renderer.uploadSDR(img);
+    // Compute crop mapping: HDR UVs [0,1] → center crop of SDR
+    const sx = imgW / img.naturalWidth;   // e.g. 1920/1920=1 or 1024/1080=0.948
+    const sy = imgH / img.naturalHeight;  // e.g. 1024/1080=0.948 or 1920/1920=1
+    const ox = (1 - sx) / 2;
+    const oy = (1 - sy) / 2;
+    renderer.sdrCrop = [sx, sy, ox, oy];
+    renderAndHist();
+  };
+  img.src = sdrUrl(clip, frame);
+}
+
+// ── Render + scope ───────────────────────────────────────
+function renderAndHist() {
+  if (!rgbData) return;
+  renderer.render(params);
+  if (histRafId) return;
+  histRafId = requestAnimationFrame(() => {
+    histRafId = 0;
+    if (!rgbData) return;
+    lastHistPixels = renderer.readHistogramPixels(params);
+    renderer.render(params);
+    drawScope();
+  });
+}
+
+function drawScope() {
+  if (!lastHistPixels) return;
+  const c = scopeCtx.canvas;
+  if (scopeMode === 'parade') {
+    drawParade(scopeCtx, lastHistPixels, 320, 180, c.width, c.height);
+  } else {
+    const [rH, gH, bH] = computeHistogram(lastHistPixels);
+    drawHistogram(scopeCtx, rH, gH, bH, c.width, c.height);
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+//  UI wiring
+// ══════════════════════════════════════════════════════════
+
+function wireToolbar() {
+  // Thumbnail clip picker
+  const trigger = $<HTMLButtonElement>('#clip-trigger');
+  const triggerThumb = $<HTMLImageElement>('#clip-trigger-thumb');
+  const triggerName = $<HTMLElement>('#clip-trigger-name');
+  const popup = $<HTMLElement>('#clip-popup');
+  const grid = $<HTMLElement>('#clip-grid');
+
+  const thumbUrl = (id: string) => `${CLIP_BASE}/${id}/thumbnail.jpg`;
+
+  function updateTrigger() {
+    triggerThumb.src = thumbUrl(currentClip.id);
+    triggerName.textContent = currentClip.label;
+  }
+
+  function selectClip(i: number) {
+    currentClip = CLIPS[i];
+    const fs = $<HTMLInputElement>('#frame-slider');
+    fs.max = String(currentClip.frames - 1);
+    $<HTMLElement>('#tl-end').textContent = String(currentClip.frames - 1);
+    currentFrame = Math.min(currentFrame, currentClip.frames - 1);
+    fs.value = String(currentFrame);
+    $<HTMLElement>('#frame-num').textContent = String(currentFrame);
+    updateTrigger();
+    // update active state in grid
+    grid.querySelectorAll('.clip-item').forEach((el, idx) => {
+      el.classList.toggle('active', idx === i);
+    });
+    popup.classList.remove('open');
+    loadFrame(currentClip.id, currentFrame);
+  }
+
+  // Build grid
+  CLIPS.forEach((c, i) => {
+    const item = document.createElement('div');
+    item.className = 'clip-item' + (i === 0 ? ' active' : '');
+    item.innerHTML =
+      `<img class="clip-item-thumb" src="${thumbUrl(c.id)}" loading="lazy" alt=""/>` +
+      `<div class="clip-item-name">${c.label}</div>`;
+    item.addEventListener('click', () => selectClip(i));
+    grid.appendChild(item);
+  });
+  updateTrigger();
+
+  // Open / close popup
+  trigger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    popup.classList.toggle('open');
+  });
+  document.addEventListener('click', (e) => {
+    if (!popup.contains(e.target as Node) && e.target !== trigger) {
+      popup.classList.remove('open');
+    }
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') popup.classList.remove('open');
+  });
+
+  // EV slider + number input + reset
+  const evSlider = $<HTMLInputElement>('#sl-exposure');
+  const evNum = $<HTMLInputElement>('#tb-ev');
+  const evReset = $<HTMLElement>('#ev-reset');
+
+  function setEV(val: number) {
+    val = Math.max(-6, Math.min(6, val));
+    params.exposure = val;
+    evSlider.value = String(val);
+    evNum.value = val.toFixed(2);
+    evReset.classList.toggle('show', Math.abs(val) > 0.001);
+    renderAndHist();
+  }
+
+  evSlider.addEventListener('input', () => setEV(+evSlider.value));
+  evNum.addEventListener('change', () => setEV(parseFloat(evNum.value) || 0));
+  evNum.addEventListener('keydown', (e) => { if (e.key === 'Enter') evNum.blur(); });
+  evReset.addEventListener('click', () => setEV(0));
+
+  // tone mapping
+  const tmSel = $<HTMLSelectElement>('#tm-select');
+  tmSel.value = String(params.toneMapping);
+  tmSel.addEventListener('change', () => { params.toneMapping = +tmSel.value; renderAndHist(); });
+
+  // LUT loader
+  const lutBtn = $<HTMLElement>('#btn-lut');
+  const lutFile = $<HTMLInputElement>('#lut-file');
+  const lutName = $<HTMLElement>('#lut-name');
+
+  lutBtn.addEventListener('click', () => {
+    if (renderer.lutEnabled) {
+      // Toggle off
+      renderer.clearLUT();
+      lutBtn.classList.remove('active');
+      lutName.textContent = '';
+      renderAndHist();
+    } else {
+      lutFile.click();
+    }
+  });
+
+  lutFile.addEventListener('change', () => {
+    const file = lutFile.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = parseCube(reader.result as string);
+      if (!result) { alert('Could not parse .cube file (only 3D LUTs supported)'); return; }
+      renderer.uploadLUT(result.data, result.size);
+      lutBtn.classList.add('active');
+      lutName.textContent = file.name.replace('.cube', '');
+      renderAndHist();
+    };
+    reader.readAsText(file);
+    lutFile.value = ''; // allow re-selecting same file
+  });
+}
+
+function wireTimeline() {
+  const fs = $<HTMLInputElement>('#frame-slider');
+  fs.max = String(currentClip.frames - 1);
+  fs.value = String(currentFrame);
+  $<HTMLElement>('#frame-num').textContent = String(currentFrame);
+  $<HTMLElement>('#tl-end').textContent = String(currentClip.frames - 1);
+
+  fs.addEventListener('input', () => {
+    currentFrame = +fs.value;
+    $<HTMLElement>('#frame-num').textContent = String(currentFrame);
+  });
+  fs.addEventListener('change', () => {
+    currentFrame = +fs.value;
+    loadFrame(currentClip.id, currentFrame);
+  });
+}
+
+function wirePanel() {
+  bindSlider('#sl-softclip',    'softClip',    v => v.toFixed(2));
+  bindSlider('#sl-contrast',    'contrast',    v => v.toFixed(2));
+  bindSlider('#sl-pivot',       'pivot',       v => v.toFixed(2));
+  bindSlider('#sl-shadows',     'shadows',     v => v.toFixed(2));
+  bindSlider('#sl-highlights',  'highlights',  v => v.toFixed(2));
+  bindSlider('#sl-temperature', 'temperature', v => v.toFixed(2));
+  bindSlider('#sl-tint',        'tint',        v => v.toFixed(2));
+  bindSlider('#sl-saturation',  'saturation',  v => v.toFixed(2));
+  bindSlider('#sl-vibrance',    'vibrance',    v => v.toFixed(2));
+  bindSlider('#sl-hueshift',    'hueShift',    v => `${v.toFixed(0)}\u00b0`);
+
+  $<HTMLInputElement>('#fc-check').addEventListener('change', (e) => {
+    params.falseColor = (e.target as HTMLInputElement).checked;
+    $<HTMLElement>('.fc-legend').classList.toggle('show', params.falseColor);
+    renderAndHist();
+  });
+
+  $<HTMLElement>('#btn-reset').addEventListener('click', resetAll);
+}
+
+function wireScopeTabs() {
+  document.querySelectorAll<HTMLElement>('.scope-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.scope-tab').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      scopeMode = btn.dataset.mode as 'histogram' | 'parade';
+      drawScope();
+    });
+  });
+}
+
+function wirePanelToggle() {
+  const wrap = $<HTMLElement>('#panel-wrap');
+  const btn = $<HTMLElement>('#btn-panel');
+  function toggle() {
+    wrap.classList.toggle('hidden');
+    btn.classList.toggle('active', !wrap.classList.contains('hidden'));
+  }
+  btn.addEventListener('click', toggle);
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab' && !e.ctrlKey && !e.altKey && document.activeElement?.tagName !== 'INPUT') {
+      e.preventDefault(); toggle();
+    }
+  });
+  btn.classList.add('active');
+}
+
+function wirePanelResize() {
+  const wrap = $<HTMLElement>('#panel-wrap');
+  const handle = $<HTMLElement>('#panel-resize');
+  let dragging = false;
+  handle.addEventListener('pointerdown', (e) => {
+    dragging = true; handle.setPointerCapture(e.pointerId);
+    document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
+  });
+  window.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    wrap.style.width = Math.max(260, Math.min(600, document.documentElement.clientWidth - e.clientX)) + 'px';
+  });
+  window.addEventListener('pointerup', () => {
+    if (!dragging) return; dragging = false;
+    document.body.style.cursor = ''; document.body.style.userSelect = '';
+  });
+}
+
+// ── SDR Compare (wipe) ───────────────────────────────────
+function wireCompare() {
+  const btn = $<HTMLElement>('#btn-compare');
+  const wipeLine = $<HTMLElement>('#wipe-line');
+  const lblL = $<HTMLElement>('#wipe-label-l');
+  const lblR = $<HTMLElement>('#wipe-label-r');
+  const canvas = $<HTMLCanvasElement>('#canvas');
+
+  function toggleCompare() {
+    compareOn = !compareOn;
+    renderer.compareOn = compareOn;
+    btn.classList.toggle('active', compareOn);
+    wipeLine.classList.toggle('active', compareOn);
+    lblL.classList.toggle('active', compareOn);
+    lblR.classList.toggle('active', compareOn);
+    if (compareOn) loadSDR(currentClip.id, currentFrame);
+    renderAndHist();
+    updateWipeUI();
+  }
+
+  btn.addEventListener('click', toggleCompare);
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'c' && !e.ctrlKey && document.activeElement?.tagName !== 'INPUT') toggleCompare();
+  });
+
+  // wipe drag — on the canvas itself (not just the thin line)
+  let wipeDrag = false;
+  wipeLine.addEventListener('pointerdown', (e) => {
+    wipeDrag = true; wipeLine.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('pointerdown', (e) => {
+    if (!compareOn || e.ctrlKey) return;
+    wipeDrag = true;
+    const rect = canvas.getBoundingClientRect();
+    wipePos = Math.max(0.02, Math.min(0.98, (e.clientX - rect.left) / rect.width));
+    renderer.wipePos = wipePos;
+    renderAndHist();
+    updateWipeUI();
+  });
+  window.addEventListener('pointermove', (e) => {
+    if (!wipeDrag || !compareOn) return;
+    const rect = canvas.getBoundingClientRect();
+    wipePos = Math.max(0.02, Math.min(0.98, (e.clientX - rect.left) / rect.width));
+    renderer.wipePos = wipePos;
+    renderAndHist();
+    updateWipeUI();
+  });
+  window.addEventListener('pointerup', () => { wipeDrag = false; });
+}
+
+function updateWipeUI() {
+  const wipeLine = $<HTMLElement>('#wipe-line');
+  const lblL = $<HTMLElement>('#wipe-label-l');
+  const lblR = $<HTMLElement>('#wipe-label-r');
+  // Position CSS wipe line over the canvas area
+  const canvas = $<HTMLCanvasElement>('#canvas');
+  const rect = canvas.getBoundingClientRect();
+  const viewport = canvas.closest('.viewport') as HTMLElement;
+  const vRect = viewport.getBoundingClientRect();
+  const lineX = rect.left - vRect.left + rect.width * wipePos;
+  wipeLine.style.left = lineX + 'px';
+  lblL.style.left = (rect.left - vRect.left + rect.width * wipePos * 0.5) + 'px';
+  lblR.style.left = (rect.left - vRect.left + rect.width * (wipePos + (1 - wipePos) * 0.5)) + 'px';
+}
+
+// ── Pixel inspector ──────────────────────────────────────
+function wirePixelInspector(canvas: HTMLCanvasElement) {
+  canvas.addEventListener('mousemove', (e) => {
+    if (!rgbData) return;
+    const rect = canvas.getBoundingClientRect();
+    const px = Math.floor((e.clientX - rect.left) * imgW / rect.width);
+    const py = Math.floor((e.clientY - rect.top) * imgH / rect.height);
+    if (px < 0 || py < 0 || px >= imgW || py >= imgH) return;
+    const idx = (py * imgW + px) * 3;
+    const r = rgbData[idx], g = rgbData[idx+1], b = rgbData[idx+2];
+    $<HTMLElement>('#px-coord').textContent = `(${px}, ${py})`;
+    $<HTMLElement>('#px-rgb').textContent = `R:${fmtF(r)} G:${fmtF(g)} B:${fmtF(b)}`;
+    const lum = 0.2126*r + 0.7152*g + 0.0722*b;
+    $<HTMLElement>('#px-lum').textContent = `L:${fmtF(lum)}`;
+    $<HTMLElement>('#px-swatch').style.background = `rgb(${cl(r)*255|0},${cl(g)*255|0},${cl(b)*255|0})`;
+  });
+  canvas.addEventListener('mouseleave', () => {
+    $<HTMLElement>('#px-coord').textContent = '';
+    $<HTMLElement>('#px-rgb').textContent = '';
+    $<HTMLElement>('#px-lum').textContent = '';
+  });
+
+  // Ctrl+click probe
+  const probe = $<HTMLElement>('#probe');
+  const probeLbl = probe.querySelector('.probe-label') as HTMLElement;
+  const viewport = canvas.closest('.viewport') as HTMLElement;
+
+  canvas.addEventListener('click', (e) => {
+    if (!e.ctrlKey || !rgbData) { probe.classList.remove('show'); return; }
+    const cRect = canvas.getBoundingClientRect();
+    const px = Math.floor((e.clientX - cRect.left) * imgW / cRect.width);
+    const py = Math.floor((e.clientY - cRect.top) * imgH / cRect.height);
+    if (px < 0 || py < 0 || px >= imgW || py >= imgH) return;
+    const idx = (py * imgW + px) * 3;
+    const r = rgbData[idx], g = rgbData[idx+1], b = rgbData[idx+2];
+    const lum = 0.2126*r + 0.7152*g + 0.0722*b;
+    const ev = lum > 1e-6 ? Math.log2(lum / 0.18) : -Infinity;
+    const evStr = ev > -20 ? `${ev >= 0 ? '+' : ''}${ev.toFixed(1)} EV` : '\u2212\u221e EV';
+    const vRect = viewport.getBoundingClientRect();
+    const probeX = e.clientX - vRect.left, probeY = e.clientY - vRect.top;
+    probe.style.left = probeX + 'px'; probe.style.top = probeY + 'px';
+    if (probeX > vRect.width * 0.65) { probeLbl.style.left = 'auto'; probeLbl.style.right = '14px'; }
+    else { probeLbl.style.left = '14px'; probeLbl.style.right = 'auto'; }
+    probeLbl.innerHTML =
+      `<span style="color:var(--dim)">(${px}, ${py})</span>` +
+      `<span class="pr">R: ${fmtF(r)}</span><span class="pg">G: ${fmtF(g)}</span>` +
+      `<span class="pb">B: ${fmtF(b)}</span><span class="pl">L: ${fmtF(lum)}</span>` +
+      `<span class="pev">${evStr}</span>`;
+    probe.classList.add('show');
+  });
+
+  window.addEventListener('keydown', (e) => { if (e.key === 'Escape') probe.classList.remove('show'); });
+}
+
+// ══════════════════════════════════════════════════════════
+//  Helpers
+// ══════════════════════════════════════════════════════════
+
+type ScalarKey = { [K in keyof RenderParams]: RenderParams[K] extends number ? K : never }[keyof RenderParams];
+
+function bindSlider(sel: string, key: ScalarKey, fmt: (v: number) => string) {
+  const slider = $<HTMLInputElement>(sel);
+  const labelRow = slider.closest('.slider-row')!.querySelector('.label-row') as HTMLElement;
+  const oldVal = labelRow.querySelector('.val') as HTMLElement;
+  const defaultVal = DEFAULT_PARAMS[key] as number;
+
+  const numInput = document.createElement('input');
+  numInput.type = 'number'; numInput.className = 'val-input';
+  numInput.step = slider.step; numInput.min = slider.min; numInput.max = slider.max;
+  oldVal.replaceWith(numInput);
+
+  const rst = document.createElement('button');
+  rst.className = 'sl-reset'; rst.innerHTML = '&#x21ba;';
+  rst.title = `Reset to ${fmt(defaultVal)}`;
+  labelRow.insertBefore(rst, numInput);
+
+  function syncAll(val: number) {
+    (params as any)[key] = val;
+    slider.value = String(val);
+    numInput.value = fmt(val).replace('°', '');
+    rst.classList.toggle('show', Math.abs(val - defaultVal) > 0.001);
+    renderAndHist();
+  }
+  syncAll(params[key] as number);
+  slider.addEventListener('input', () => syncAll(+slider.value));
+  numInput.addEventListener('change', () => {
+    let v = parseFloat(numInput.value); if (isNaN(v)) v = defaultVal;
+    syncAll(Math.max(+slider.min, Math.min(+slider.max, v)));
+  });
+  numInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') numInput.blur(); });
+  rst.addEventListener('click', () => syncAll(defaultVal));
+}
+
+function setSlider(sel: string, value: number) {
+  $<HTMLInputElement>(sel).value = String(value);
+  $<HTMLInputElement>(sel).dispatchEvent(new Event('input'));
+}
+
+function resetAll() {
+  params = structuredClone(DEFAULT_PARAMS);
+  // toolbar
+  $<HTMLInputElement>('#sl-exposure').value = '0';
+  $<HTMLInputElement>('#tb-ev').value = '0.00';
+  $<HTMLElement>('#ev-reset').classList.remove('show');
+  $<HTMLSelectElement>('#tm-select').value = String(params.toneMapping);
+  // panel sliders
+  setSlider('#sl-softclip', params.softClip);
+  setSlider('#sl-contrast', params.contrast);
+  setSlider('#sl-pivot', params.pivot);
+  setSlider('#sl-shadows', params.shadows);
+  setSlider('#sl-highlights', params.highlights);
+  setSlider('#sl-temperature', params.temperature);
+  setSlider('#sl-tint', params.tint);
+  setSlider('#sl-saturation', params.saturation);
+  setSlider('#sl-vibrance', params.vibrance);
+  setSlider('#sl-hueshift', params.hueShift);
+  wheels.lift.reset(); wheels.gamma.reset(); wheels.gain.reset(); wheels.offset.reset();
+  $<HTMLInputElement>('#fc-check').checked = false;
+  $<HTMLElement>('.fc-legend').classList.remove('show');
+  renderAndHist();
+}
+
+function fmtF(v: number) { return Math.abs(v) >= 10 ? v.toFixed(2) : v.toFixed(4); }
+function cl(v: number) { return Math.max(0, Math.min(1, v)); }
+
+boot().catch(console.error);

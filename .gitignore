@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.log
+.hf-upload.log
+.tunnel.log
+.DS_Store
+.vite/
+HF_README.md
