@@ -13,37 +13,14 @@
 //   3  AgX (full inset+outset)
 //   4  Hable / Uncharted 2
 // ──────────────────────────────────────────────────────────
-
-export interface RenderParams {
-  exposure: number;
-  toneMapping: number;
-  softClip: number;
-  temperature: number;
-  tint: number;
-  lift: [number, number, number];
-  gamma: [number, number, number];
-  gain: [number, number, number];
-  offset: [number, number, number];
-  contrast: number;
-  pivot: number;
-  shadows: number;
-  highlights: number;
-  saturation: number;
-  vibrance: number;
-  hueShift: number;
-  falseColor: boolean;
-}
-
-export const DEFAULT_PARAMS: RenderParams = {
-  exposure: 0, toneMapping: 2, softClip: 0,
-  temperature: 0, tint: 0,
-  lift: [0,0,0], gamma: [1,1,1], gain: [1,1,1], offset: [0,0,0],
-  contrast: 1, pivot: 0.18, shadows: 0, highlights: 0,
-  saturation: 1, vibrance: 0, hueShift: 0, falseColor: false,
+export const DEFAULT_PARAMS = {
+    exposure: 0, toneMapping: 2, softClip: 0,
+    temperature: 0, tint: 0,
+    lift: [0, 0, 0], gamma: [1, 1, 1], gain: [1, 1, 1], offset: [0, 0, 0],
+    contrast: 1, pivot: 0.18, shadows: 0, highlights: 0,
+    saturation: 1, vibrance: 0, hueShift: 0, falseColor: false,
 };
-
 // ── Shaders ──────────────────────────────────────────────
-
 const VERT = /* glsl */ `#version 300 es
 layout(location=0) in vec2 aPos;
 out vec2 vUv;
@@ -51,7 +28,6 @@ void main(){
   vUv = aPos * 0.5 + 0.5;
   gl_Position = vec4(aPos, 0.0, 1.0);
 }`;
-
 const FRAG = /* glsl */ `#version 300 es
 precision highp float;
 
@@ -390,255 +366,231 @@ void main(){
 
   oColor = vec4(c, 1.0);
 }`;
-
 // ── GL helpers ───────────────────────────────────────────
-
-function compile(gl: WebGL2RenderingContext, type: number, src: string) {
-  const s = gl.createShader(type)!;
-  gl.shaderSource(s, src);
-  gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
-    throw new Error('Shader compile:\n' + gl.getShaderInfoLog(s));
-  return s;
+function compile(gl, type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+        throw new Error('Shader compile:\n' + gl.getShaderInfoLog(s));
+    return s;
 }
-function linkProg(gl: WebGL2RenderingContext, vs: WebGLShader, fs: WebGLShader) {
-  const p = gl.createProgram()!;
-  gl.attachShader(p, vs);
-  gl.attachShader(p, fs);
-  gl.linkProgram(p);
-  if (!gl.getProgramParameter(p, gl.LINK_STATUS))
-    throw new Error('Program link:\n' + gl.getProgramInfoLog(p));
-  return p;
+function linkProg(gl, vs, fs) {
+    const p = gl.createProgram();
+    gl.attachShader(p, vs);
+    gl.attachShader(p, fs);
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+        throw new Error('Program link:\n' + gl.getProgramInfoLog(p));
+    return p;
 }
-
 const U_NAMES = [
-  'uTex', 'uTexSDR', 'uExposure', 'uToneMap', 'uSoftClip',
-  'uTemperature', 'uTint',
-  'uLift', 'uGamma', 'uGain', 'uOffset',
-  'uContrast', 'uPivot', 'uShadows', 'uHighlights',
-  'uSaturation', 'uVibrance', 'uHueShift', 'uFalseColor',
-  'uCompareOn', 'uWipePos', 'uSDRCrop',
-  'uLUT3D', 'uLUTEnabled', 'uLUTSize',
-  'uZoom', 'uPan',
-] as const;
-type Locs = Record<(typeof U_NAMES)[number], WebGLUniformLocation>;
-
+    'uTex', 'uTexSDR', 'uExposure', 'uToneMap', 'uSoftClip',
+    'uTemperature', 'uTint',
+    'uLift', 'uGamma', 'uGain', 'uOffset',
+    'uContrast', 'uPivot', 'uShadows', 'uHighlights',
+    'uSaturation', 'uVibrance', 'uHueShift', 'uFalseColor',
+    'uCompareOn', 'uWipePos', 'uSDRCrop',
+    'uLUT3D', 'uLUTEnabled', 'uLUTSize',
+    'uZoom', 'uPan',
+];
 const HIST_W = 320, HIST_H = 180;
-
 export class HDRRenderer {
-  private gl: WebGL2RenderingContext;
-  private prog: WebGLProgram;
-  private tex: WebGLTexture;
-  private texSDR: WebGLTexture;
-  private vao: WebGLVertexArrayObject;
-  private u: Locs;
-  private histFBO: WebGLFramebuffer;
-  private histRBO: WebGLRenderbuffer;
-  imageWidth = 0;
-  imageHeight = 0;
-  compareOn = false;
-  wipePos = 0.5;
-  sdrCrop: [number, number, number, number] = [1, 1, 0, 0];
-  lutEnabled = false;
-  zoom = 1.0;
-  pan: [number, number] = [0, 0];
-  private lutTex: WebGLTexture;
-  private lutSize = 33; // scaleX, scaleY, offsetX, offsetY
-
-  constructor(private canvas: HTMLCanvasElement) {
-    const gl = canvas.getContext('webgl2', { antialias: false, premultipliedAlpha: false })!;
-    if (!gl) throw new Error('WebGL2 not supported');
-    this.gl = gl;
-
-    const vs = compile(gl, gl.VERTEX_SHADER, VERT);
-    const fs = compile(gl, gl.FRAGMENT_SHADER, FRAG);
-    this.prog = linkProg(gl, vs, fs);
-
-    this.u = {} as Locs;
-    for (const n of U_NAMES) this.u[n] = gl.getUniformLocation(this.prog, n)!;
-
-    this.vao = gl.createVertexArray()!;
-    gl.bindVertexArray(this.vao);
-    const buf = gl.createBuffer()!;
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-    gl.bindVertexArray(null);
-
-    // HDR texture (float)
-    this.tex = gl.createTexture()!;
-    gl.bindTexture(gl.TEXTURE_2D, this.tex);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-    // SDR texture (8-bit, for compare mode)
-    this.texSDR = gl.createTexture()!;
-    gl.bindTexture(gl.TEXTURE_2D, this.texSDR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-    // 3D LUT texture
-    this.lutTex = gl.createTexture()!;
-    gl.bindTexture(gl.TEXTURE_3D, this.lutTex);
-    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
-
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-
-    this.histFBO = gl.createFramebuffer()!;
-    this.histRBO = gl.createRenderbuffer()!;
-    gl.bindRenderbuffer(gl.RENDERBUFFER, this.histRBO);
-    gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, HIST_W, HIST_H);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.histFBO);
-    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, this.histRBO);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  }
-
-  uploadImage(rgb: Float32Array, w: number, h: number) {
-    this.imageWidth = w; this.imageHeight = h;
-    this.resetView();  // a new image starts fit-to-viewport
-    const px = w * h;
-    const rgba = new Float32Array(px * 4);
-    for (let i = 0; i < px; i++) {
-      rgba[i*4] = rgb[i*3]; rgba[i*4+1] = rgb[i*3+1]; rgba[i*4+2] = rgb[i*3+2]; rgba[i*4+3] = 1;
+    constructor(canvas) {
+        this.canvas = canvas;
+        this.imageWidth = 0;
+        this.imageHeight = 0;
+        this.compareOn = false;
+        this.wipePos = 0.5;
+        this.sdrCrop = [1, 1, 0, 0];
+        this.lutEnabled = false;
+        this.zoom = 1.0;
+        this.pan = [0, 0];
+        this.lutSize = 33; // scaleX, scaleY, offsetX, offsetY
+        const gl = canvas.getContext('webgl2', { antialias: false, premultipliedAlpha: false });
+        if (!gl)
+            throw new Error('WebGL2 not supported');
+        this.gl = gl;
+        const vs = compile(gl, gl.VERTEX_SHADER, VERT);
+        const fs = compile(gl, gl.FRAGMENT_SHADER, FRAG);
+        this.prog = linkProg(gl, vs, fs);
+        this.u = {};
+        for (const n of U_NAMES)
+            this.u[n] = gl.getUniformLocation(this.prog, n);
+        this.vao = gl.createVertexArray();
+        gl.bindVertexArray(this.vao);
+        const buf = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+        gl.bindVertexArray(null);
+        // HDR texture (float)
+        this.tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, this.tex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        // SDR texture (8-bit, for compare mode)
+        this.texSDR = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, this.texSDR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        // 3D LUT texture
+        this.lutTex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_3D, this.lutTex);
+        gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+        this.histFBO = gl.createFramebuffer();
+        this.histRBO = gl.createRenderbuffer();
+        gl.bindRenderbuffer(gl.RENDERBUFFER, this.histRBO);
+        gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, HIST_W, HIST_H);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.histFBO);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, this.histRBO);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     }
-    const gl = this.gl;
-    gl.bindTexture(gl.TEXTURE_2D, this.tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.FLOAT, rgba);
-    this.canvas.width = w; this.canvas.height = h;
-  }
-
-  /** Upload a parsed 3D LUT. data is Float32Array of size³×3 RGB triplets. */
-  uploadLUT(data: Float32Array, size: number) {
-    const gl = this.gl;
-    this.lutSize = size;
-    // Expand RGB→RGBA (WebGL2 TEXTURE_3D needs RGBA for float)
-    const rgba = new Float32Array(size * size * size * 4);
-    for (let i = 0; i < size * size * size; i++) {
-      rgba[i * 4]     = data[i * 3];
-      rgba[i * 4 + 1] = data[i * 3 + 1];
-      rgba[i * 4 + 2] = data[i * 3 + 2];
-      rgba[i * 4 + 3] = 1.0;
+    uploadImage(rgb, w, h) {
+        this.imageWidth = w;
+        this.imageHeight = h;
+        this.resetView(); // a new image starts fit-to-viewport
+        const px = w * h;
+        const rgba = new Float32Array(px * 4);
+        for (let i = 0; i < px; i++) {
+            rgba[i * 4] = rgb[i * 3];
+            rgba[i * 4 + 1] = rgb[i * 3 + 1];
+            rgba[i * 4 + 2] = rgb[i * 3 + 2];
+            rgba[i * 4 + 3] = 1;
+        }
+        const gl = this.gl;
+        gl.bindTexture(gl.TEXTURE_2D, this.tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.FLOAT, rgba);
+        this.canvas.width = w;
+        this.canvas.height = h;
     }
-    gl.bindTexture(gl.TEXTURE_3D, this.lutTex);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); // critical: don't flip LUT slices
-    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA16F, size, size, size, 0, gl.RGBA, gl.FLOAT, rgba);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);  // restore for EXR/SDR textures
-    this.lutEnabled = true;
-  }
-
-  clearLUT() {
-    this.lutEnabled = false;
-  }
-
-  /** Upload an SDR PNG for compare mode. */
-  uploadSDR(img: HTMLImageElement) {
-    const gl = this.gl;
-    gl.bindTexture(gl.TEXTURE_2D, this.texSDR);
-    // Disable browser color-management / ICC conversion — we want raw sRGB bytes
-    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
-    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, img);
-    // Restore defaults
-    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
-  }
-
-  private setUniforms(p: RenderParams) {
-    const gl = this.gl;
-    gl.useProgram(this.prog);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.tex);
-    gl.uniform1i(this.u.uTex, 0);
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this.texSDR);
-    gl.uniform1i(this.u.uTexSDR, 1);
-    gl.uniform1i(this.u.uCompareOn, this.compareOn ? 1 : 0);
-    gl.uniform1f(this.u.uWipePos, this.wipePos);
-    gl.uniform4f(this.u.uSDRCrop, this.sdrCrop[0], this.sdrCrop[1], this.sdrCrop[2], this.sdrCrop[3]);
-    gl.activeTexture(gl.TEXTURE2);
-    gl.bindTexture(gl.TEXTURE_3D, this.lutTex);
-    gl.uniform1i(this.u.uLUT3D, 2);
-    gl.uniform1i(this.u.uLUTEnabled, this.lutEnabled ? 1 : 0);
-    gl.uniform1f(this.u.uLUTSize, this.lutSize);
-    gl.uniform1f(this.u.uExposure, p.exposure);
-    gl.uniform1i(this.u.uToneMap, p.toneMapping);
-    gl.uniform1f(this.u.uSoftClip, p.softClip);
-    gl.uniform1f(this.u.uTemperature, p.temperature);
-    gl.uniform1f(this.u.uTint, p.tint);
-    gl.uniform3f(this.u.uLift, p.lift[0], p.lift[1], p.lift[2]);
-    gl.uniform3f(this.u.uGamma, p.gamma[0], p.gamma[1], p.gamma[2]);
-    gl.uniform3f(this.u.uGain, p.gain[0], p.gain[1], p.gain[2]);
-    gl.uniform3f(this.u.uOffset, p.offset[0], p.offset[1], p.offset[2]);
-    gl.uniform1f(this.u.uContrast, p.contrast);
-    gl.uniform1f(this.u.uPivot, p.pivot);
-    gl.uniform1f(this.u.uShadows, p.shadows);
-    gl.uniform1f(this.u.uHighlights, p.highlights);
-    gl.uniform1f(this.u.uSaturation, p.saturation);
-    gl.uniform1f(this.u.uVibrance, p.vibrance);
-    gl.uniform1f(this.u.uHueShift, p.hueShift);
-    gl.uniform1i(this.u.uFalseColor, p.falseColor ? 1 : 0);
-    gl.uniform1f(this.u.uZoom, this.zoom);
-    gl.uniform2f(this.u.uPan, this.pan[0], this.pan[1]);
-    gl.bindVertexArray(this.vao);
-  }
-
-  /** Reset zoom/pan to fit (zoom=1, pan=0). Call when a new image loads. */
-  resetView() {
-    this.zoom = 1.0;
-    this.pan = [0, 0];
-  }
-
-  /**
-   * Convert a pointer's client coords (within the canvas's bounding rect)
-   * to integer image-pixel coords, applying the inverse view transform.
-   * Returns null if the cursor is outside the image bounds at the current
-   * zoom/pan.
-   */
-  canvasToImagePixel(rect: DOMRect, clientX: number, clientY: number): [number, number] | null {
-    const sx = (clientX - rect.left) / rect.width;
-    const sy = (clientY - rect.top) / rect.height;
-    const ux = (sx - 0.5) / this.zoom + 0.5 + this.pan[0];
-    const uy = (sy - 0.5) / this.zoom + 0.5 + this.pan[1];
-    if (ux < 0 || uy < 0 || ux > 1 || uy > 1) return null;
-    return [Math.floor(ux * this.imageWidth), Math.floor(uy * this.imageHeight)];
-  }
-
-  render(p: RenderParams) {
-    const gl = this.gl;
-    this.setUniforms(p);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-  }
-
-  readHistogramPixels(p: RenderParams): Uint8Array {
-    const gl = this.gl;
-    this.setUniforms(p);
-    // Histogram always reflects the WHOLE image, regardless of viewer zoom/pan.
-    gl.uniform1f(this.u.uZoom, 1.0);
-    gl.uniform2f(this.u.uPan, 0, 0);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.histFBO);
-    gl.viewport(0, 0, HIST_W, HIST_H);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    const buf = new Uint8Array(HIST_W * HIST_H * 4);
-    gl.readPixels(0, 0, HIST_W, HIST_H, gl.RGBA, gl.UNSIGNED_BYTE, buf);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    return buf;
-  }
-
-  destroy() {
-    const gl = this.gl;
-    gl.deleteProgram(this.prog);
-    gl.deleteTexture(this.tex);
-    gl.deleteFramebuffer(this.histFBO);
-    gl.deleteRenderbuffer(this.histRBO);
-  }
+    /** Upload a parsed 3D LUT. data is Float32Array of size³×3 RGB triplets. */
+    uploadLUT(data, size) {
+        const gl = this.gl;
+        this.lutSize = size;
+        // Expand RGB→RGBA (WebGL2 TEXTURE_3D needs RGBA for float)
+        const rgba = new Float32Array(size * size * size * 4);
+        for (let i = 0; i < size * size * size; i++) {
+            rgba[i * 4] = data[i * 3];
+            rgba[i * 4 + 1] = data[i * 3 + 1];
+            rgba[i * 4 + 2] = data[i * 3 + 2];
+            rgba[i * 4 + 3] = 1.0;
+        }
+        gl.bindTexture(gl.TEXTURE_3D, this.lutTex);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); // critical: don't flip LUT slices
+        gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA16F, size, size, size, 0, gl.RGBA, gl.FLOAT, rgba);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); // restore for EXR/SDR textures
+        this.lutEnabled = true;
+    }
+    clearLUT() {
+        this.lutEnabled = false;
+    }
+    /** Upload an SDR PNG for compare mode. */
+    uploadSDR(img) {
+        const gl = this.gl;
+        gl.bindTexture(gl.TEXTURE_2D, this.texSDR);
+        // Disable browser color-management / ICC conversion — we want raw sRGB bytes
+        gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, img);
+        // Restore defaults
+        gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
+    }
+    setUniforms(p) {
+        const gl = this.gl;
+        gl.useProgram(this.prog);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, this.tex);
+        gl.uniform1i(this.u.uTex, 0);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, this.texSDR);
+        gl.uniform1i(this.u.uTexSDR, 1);
+        gl.uniform1i(this.u.uCompareOn, this.compareOn ? 1 : 0);
+        gl.uniform1f(this.u.uWipePos, this.wipePos);
+        gl.uniform4f(this.u.uSDRCrop, this.sdrCrop[0], this.sdrCrop[1], this.sdrCrop[2], this.sdrCrop[3]);
+        gl.activeTexture(gl.TEXTURE2);
+        gl.bindTexture(gl.TEXTURE_3D, this.lutTex);
+        gl.uniform1i(this.u.uLUT3D, 2);
+        gl.uniform1i(this.u.uLUTEnabled, this.lutEnabled ? 1 : 0);
+        gl.uniform1f(this.u.uLUTSize, this.lutSize);
+        gl.uniform1f(this.u.uExposure, p.exposure);
+        gl.uniform1i(this.u.uToneMap, p.toneMapping);
+        gl.uniform1f(this.u.uSoftClip, p.softClip);
+        gl.uniform1f(this.u.uTemperature, p.temperature);
+        gl.uniform1f(this.u.uTint, p.tint);
+        gl.uniform3f(this.u.uLift, p.lift[0], p.lift[1], p.lift[2]);
+        gl.uniform3f(this.u.uGamma, p.gamma[0], p.gamma[1], p.gamma[2]);
+        gl.uniform3f(this.u.uGain, p.gain[0], p.gain[1], p.gain[2]);
+        gl.uniform3f(this.u.uOffset, p.offset[0], p.offset[1], p.offset[2]);
+        gl.uniform1f(this.u.uContrast, p.contrast);
+        gl.uniform1f(this.u.uPivot, p.pivot);
+        gl.uniform1f(this.u.uShadows, p.shadows);
+        gl.uniform1f(this.u.uHighlights, p.highlights);
+        gl.uniform1f(this.u.uSaturation, p.saturation);
+        gl.uniform1f(this.u.uVibrance, p.vibrance);
+        gl.uniform1f(this.u.uHueShift, p.hueShift);
+        gl.uniform1i(this.u.uFalseColor, p.falseColor ? 1 : 0);
+        gl.uniform1f(this.u.uZoom, this.zoom);
+        gl.uniform2f(this.u.uPan, this.pan[0], this.pan[1]);
+        gl.bindVertexArray(this.vao);
+    }
+    /** Reset zoom/pan to fit (zoom=1, pan=0). Call when a new image loads. */
+    resetView() {
+        this.zoom = 1.0;
+        this.pan = [0, 0];
+    }
+    /**
+     * Convert a pointer's client coords (within the canvas's bounding rect)
+     * to integer image-pixel coords, applying the inverse view transform.
+     * Returns null if the cursor is outside the image bounds at the current
+     * zoom/pan.
+     */
+    canvasToImagePixel(rect, clientX, clientY) {
+        const sx = (clientX - rect.left) / rect.width;
+        const sy = (clientY - rect.top) / rect.height;
+        const ux = (sx - 0.5) / this.zoom + 0.5 + this.pan[0];
+        const uy = (sy - 0.5) / this.zoom + 0.5 + this.pan[1];
+        if (ux < 0 || uy < 0 || ux > 1 || uy > 1)
+            return null;
+        return [Math.floor(ux * this.imageWidth), Math.floor(uy * this.imageHeight)];
+    }
+    render(p) {
+        const gl = this.gl;
+        this.setUniforms(p);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+    readHistogramPixels(p) {
+        const gl = this.gl;
+        this.setUniforms(p);
+        // Histogram always reflects the WHOLE image, regardless of viewer zoom/pan.
+        gl.uniform1f(this.u.uZoom, 1.0);
+        gl.uniform2f(this.u.uPan, 0, 0);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.histFBO);
+        gl.viewport(0, 0, HIST_W, HIST_H);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        const buf = new Uint8Array(HIST_W * HIST_H * 4);
+        gl.readPixels(0, 0, HIST_W, HIST_H, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        return buf;
+    }
+    destroy() {
+        const gl = this.gl;
+        gl.deleteProgram(this.prog);
+        gl.deleteTexture(this.tex);
+        gl.deleteFramebuffer(this.histFBO);
+        gl.deleteRenderbuffer(this.histRBO);
+    }
 }
+//# sourceMappingURL=renderer.js.map
