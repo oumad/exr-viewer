@@ -234,6 +234,7 @@ async function loadExrBuffer(bytes: Uint8Array) {
     rgbData = dec.interleavedRgbPixels;
     imgW = dec.width; imgH = dec.height;
     renderer.uploadImage(rgbData, imgW, imgH);
+    resetView($<HTMLCanvasElement>('#canvas'));  // each new image starts fit-to-viewport
     // Render inside rAF so the GL draw lands in the next compositor pass.
     // Without this, the draw happens in a macrotask that the compositor
     // may skip — the canvas stays black until *some* subsequent event
@@ -347,6 +348,7 @@ async function loadFrame(clip: string, frame: number) {
     rgbData = dec.interleavedRgbPixels;
     imgW = dec.width; imgH = dec.height;
     renderer.uploadImage(rgbData, imgW, imgH);
+    resetView($<HTMLCanvasElement>('#canvas'));  // standalone clip browser also fits each new frame
     renderAndHist();
     $<HTMLElement>('#info-res').textContent = `${imgW}\u00d7${imgH}`;
     $<HTMLElement>('#info-decode').textContent = `${dt} ms`;
@@ -709,31 +711,60 @@ function updateWipeUI() {
 }
 
 // ── Pixel inspector ──────────────────────────────────────
-// ── Zoom + Pan ───────────────────────────────────────────
+// ── Zoom + Pan (CSS transform) ───────────────────────────
 //   Wheel               — zoom in/out, centered on cursor
 //   Middle-drag         — pan (always)
 //   Left-drag           — pan (only when compare wipe is OFF; otherwise
 //                         left-drag drives the wipe line)
 //   Double-click / 0/F  — reset to fit
+//
+// CSS-transform-based so the canvas itself grows beyond its fit-to-
+// viewport size at zoom > 1 (viewport has overflow:hidden). Pan and
+// pixel inspection both use getBoundingClientRect, which returns the
+// post-transform rect — no manual inverse math needed.
+let viewZoom = 1;
+let viewPanX = 0;  // CSS pixels
+let viewPanY = 0;
+
+function applyView(canvas: HTMLCanvasElement) {
+  canvas.style.transformOrigin = '50% 50%';
+  canvas.style.transform = `translate(${viewPanX}px, ${viewPanY}px) scale(${viewZoom})`;
+  // Wipe overlay positions reference the canvas's bounding rect, which
+  // is post-transform — keep them in sync after every change.
+  if (compareOn) updateWipeUI();
+}
+
+function resetView(canvas: HTMLCanvasElement) {
+  viewZoom = 1; viewPanX = 0; viewPanY = 0;
+  applyView(canvas);
+}
+
 function wireZoomPan(canvas: HTMLCanvasElement) {
   let panning = false;
-  const start = { x: 0, y: 0, panX: 0, panY: 0 };
+  let startX = 0, startY = 0, startPanX = 0, startPanY = 0;
 
   canvas.addEventListener('wheel', (e) => {
     if (!rgbData) return;
     e.preventDefault();
+    // Cursor's image-UV BEFORE zoom — held constant after.
     const rect = canvas.getBoundingClientRect();
-    const sx = (e.clientX - rect.left) / rect.width;
-    const sy = (e.clientY - rect.top) / rect.height;
-    const oldZ = renderer.zoom;
+    const ux = (e.clientX - rect.left) / rect.width;
+    const uy = (e.clientY - rect.top) / rect.height;
+    const oldZ = viewZoom;
     const factor = Math.exp(-e.deltaY * 0.0015);
     const newZ = Math.max(0.1, Math.min(64, oldZ * factor));
-    // Keep the image point under the cursor stationary across the zoom.
-    const dx = (sx - 0.5) * (1 / oldZ - 1 / newZ);
-    const dy = (sy - 0.5) * (1 / oldZ - 1 / newZ);
-    renderer.zoom = newZ;
-    renderer.pan = [renderer.pan[0] + dx, renderer.pan[1] + dy];
-    renderAndHist();
+    if (newZ === oldZ) return;
+    // After zoom alone (with transform-origin: center), the rect grows
+    // around its own center. We then translate so the cursor lands on
+    // the same image-UV.
+    const newW = rect.width  * (newZ / oldZ);
+    const newH = rect.height * (newZ / oldZ);
+    const newLeftIfNoPanChange = rect.left + rect.width  / 2 - newW / 2;
+    const newTopIfNoPanChange  = rect.top  + rect.height / 2 - newH / 2;
+    viewPanX += (e.clientX - ux * newW) - newLeftIfNoPanChange;
+    viewPanY += (e.clientY - uy * newH) - newTopIfNoPanChange;
+    viewZoom = newZ;
+    applyView(canvas);
   }, { passive: false });
 
   canvas.addEventListener('pointerdown', (e) => {
@@ -744,38 +775,36 @@ function wireZoomPan(canvas: HTMLCanvasElement) {
     e.preventDefault();
     panning = true;
     canvas.setPointerCapture(e.pointerId);
-    start.x = e.clientX; start.y = e.clientY;
-    start.panX = renderer.pan[0]; start.panY = renderer.pan[1];
+    startX = e.clientX; startY = e.clientY;
+    startPanX = viewPanX; startPanY = viewPanY;
     canvas.style.cursor = 'grabbing';
   });
 
   canvas.addEventListener('pointermove', (e) => {
     if (!panning) return;
-    const rect = canvas.getBoundingClientRect();
-    // Drag distance in screen UV, divided by zoom — bigger zoom = finer pan.
-    const dux = (e.clientX - start.x) / rect.width  / renderer.zoom;
-    const duy = (e.clientY - start.y) / rect.height / renderer.zoom;
-    renderer.pan = [start.panX - dux, start.panY - duy];
-    renderAndHist();
+    // Pan in screen pixels — drag direction matches image direction.
+    viewPanX = startPanX + (e.clientX - startX);
+    viewPanY = startPanY + (e.clientY - startY);
+    applyView(canvas);
   });
 
-  const endPan = () => { if (!panning) return; panning = false; canvas.style.cursor = ''; };
+  const endPan = () => {
+    if (!panning) return;
+    panning = false;
+    canvas.style.cursor = '';
+  };
   canvas.addEventListener('pointerup', endPan);
   canvas.addEventListener('pointercancel', endPan);
 
   canvas.addEventListener('dblclick', (e) => {
     if (compareOn || e.ctrlKey) return;
-    renderer.resetView();
-    renderAndHist();
+    resetView(canvas);
   });
 
   window.addEventListener('keydown', (e) => {
-    if (document.activeElement?.tagName === 'INPUT' ||
-        document.activeElement?.tagName === 'SELECT') return;
-    if (e.key === '0' || e.key === 'f' || e.key === 'F') {
-      renderer.resetView();
-      renderAndHist();
-    }
+    const tag = document.activeElement?.tagName;
+    if (tag === 'INPUT' || tag === 'SELECT') return;
+    if (e.key === '0' || e.key === 'f' || e.key === 'F') resetView(canvas);
   });
 }
 
@@ -783,14 +812,9 @@ function wirePixelInspector(canvas: HTMLCanvasElement) {
   canvas.addEventListener('mousemove', (e) => {
     if (!rgbData) return;
     const rect = canvas.getBoundingClientRect();
-    const hit = renderer.canvasToImagePixel(rect, e.clientX, e.clientY);
-    if (!hit) {
-      $<HTMLElement>('#px-coord').textContent = '';
-      $<HTMLElement>('#px-rgb').textContent = '';
-      $<HTMLElement>('#px-lum').textContent = '';
-      return;
-    }
-    const [px, py] = hit;
+    const px = Math.floor((e.clientX - rect.left) * imgW / rect.width);
+    const py = Math.floor((e.clientY - rect.top) * imgH / rect.height);
+    if (px < 0 || py < 0 || px >= imgW || py >= imgH) return;
     const idx = (py * imgW + px) * 3;
     const r = rgbData[idx], g = rgbData[idx+1], b = rgbData[idx+2];
     $<HTMLElement>('#px-coord').textContent = `(${px}, ${py})`;
@@ -813,9 +837,9 @@ function wirePixelInspector(canvas: HTMLCanvasElement) {
   canvas.addEventListener('click', (e) => {
     if (!e.ctrlKey || !rgbData) { probe.classList.remove('show'); return; }
     const cRect = canvas.getBoundingClientRect();
-    const hit = renderer.canvasToImagePixel(cRect, e.clientX, e.clientY);
-    if (!hit) return;
-    const [px, py] = hit;
+    const px = Math.floor((e.clientX - cRect.left) * imgW / cRect.width);
+    const py = Math.floor((e.clientY - cRect.top) * imgH / cRect.height);
+    if (px < 0 || py < 0 || px >= imgW || py >= imgH) return;
     const idx = (py * imgW + px) * 3;
     const r = rgbData[idx], g = rgbData[idx+1], b = rgbData[idx+2];
     const lum = 0.2126*r + 0.7152*g + 0.0722*b;
