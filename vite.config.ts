@@ -45,8 +45,10 @@ function wasmRedirect(): Plugin {
 }
 
 export default defineConfig(({ command }) => ({
-  // gh-pages serves from /exr-viewer/ subpath in production
-  base: command === 'build' ? '/exr-viewer/' : '/',
+  // Relative base so the built bundle works anywhere it's hosted —
+  // gh-pages (`/exr-viewer/`), ComfyUI iframe (`/extensions/ComfyUI_Gear/vendor/`),
+  // local file:// testing, etc.
+  base: command === 'build' ? './' : '/',
   plugins: [wasmRedirect(), serveClips()],
   server: {
     // Allow tunnel domains (Cloudflare quick-tunnel, ngrok, etc.)

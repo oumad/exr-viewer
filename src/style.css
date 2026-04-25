@@ -408,3 +408,15 @@ details[open]>summary::before{transform:rotate(90deg)}
   position:absolute;bottom:6px;right:6px;
   font-size:9px;color:rgba(255,255,255,0.2);pointer-events:none;
 }
+
+/* ── Embed mode (iframe host like ComfyUI_Gear) ─────────────
+   Hides clip picker + probe hint. Timeline is hidden by default
+   and re-enabled (body.embed-seq) only when a batch/sequence of
+   multiple EXRs is loaded, giving the user a frame scrubber. */
+.embed-mode .clip-picker,
+.embed-mode .clip-popup,
+.embed-mode .probe-hint,
+.embed-mode .tb-info { display: none; }
+.embed-mode .timeline { display: none; }
+.embed-mode.embed-seq .timeline { display: flex; }
+.embed-mode .main { height: 100vh; }

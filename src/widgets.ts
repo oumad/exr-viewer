@@ -162,6 +162,22 @@ export class ColorWheel {
     this.draw();
   }
 
+  /** Full wheel state (for UI restoration). Pairs with setState(). */
+  getState(): { dx: number; dy: number; master: number } {
+    return { dx: this.dx, dy: this.dy, master: this.master };
+  }
+
+  /** Restore exact wheel dot + master position. Recomputes rgb values. */
+  setState(s: { dx?: number; dy?: number; master?: number }) {
+    this.dx = s.dx ?? 0;
+    this.dy = s.dy ?? 0;
+    this.master = s.master ?? 0;
+    this.masterInput.value = String(this.master);
+    this.masterValEl.textContent = this.master.toFixed(2);
+    this.computeValues();
+    this.draw();
+  }
+
   // ── Internals ──────────────────────────────────────────
 
   private onDown(e: PointerEvent) {

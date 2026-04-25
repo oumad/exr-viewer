@@ -1,5 +1,4 @@
 node_modules/
-dist/
 *.log
 .hf-upload.log
 .tunnel.log

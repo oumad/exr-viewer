@@ -5,6 +5,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:lib": "tsc && vite build --config vite.lib.config.ts",
+    "build:all": "npm run build && npm run build:lib",
     "preview": "vite preview"
   },
   "dependencies": {

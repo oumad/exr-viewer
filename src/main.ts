@@ -3,7 +3,7 @@ import { HDRRenderer, DEFAULT_PARAMS, type RenderParams } from './renderer';
 import { ColorWheel, computeHistogram, drawHistogram, drawParade } from './widgets';
 import './style.css';
 
-// ── Clip catalog (27 clips) ──────────────────────────────
+// ── Clip catalog (28 clips) ──────────────────────────────
 const CLIPS = [
   { id: 'dandelion_girl_sunset',      label: 'Dandelion Girl Sunset',      frames: 97  },
   { id: 'airport_silhouettes_sunset', label: 'Airport Silhouettes Sunset', frames: 121 },
@@ -19,6 +19,7 @@ const CLIPS = [
   { id: 'city_rooftops_aerial',       label: 'City Rooftops Aerial',       frames: 121 },
   { id: 'city_roundabout_night',      label: 'City Roundabout Night',      frames: 121 },
   { id: 'dancer_blue_studio',         label: 'Dancer Blue Studio',         frames: 121 },
+  { id: 'driver_golden_hour_car',     label: 'Driver Golden Hour Car',     frames: 121 },
   { id: 'dusk_field_clouds',          label: 'Dusk Field Clouds',          frames: 121 },
   { id: 'forest_stream_golden',       label: 'Forest Stream Golden',       frames: 121 },
   { id: 'girls_bokeh_picnic',         label: 'Girls Bokeh Picnic',         frames: 57  },
@@ -55,8 +56,23 @@ let wipePos = 0.5;
 
 const $ = <T extends HTMLElement>(s: string) => document.querySelector<T>(s)!;
 
+// ── Embed mode (for ComfyUI_Gear and other hosts) ───────
+// Activated by `?embed=1`. Hides clip picker + timeline, waits for the
+// host to push EXR bytes via postMessage instead of loading a default clip.
+// Emits `gear:params_changed` on every grade update; accepts
+// `gear:load_exr` and `gear:set_params` inbound.
+const EMBED = typeof location !== 'undefined'
+  && new URLSearchParams(location.search).has('embed');
+let applyingRemoteParams = false;
+
+function postToHost(msg: unknown) {
+  if (!EMBED || window.parent === window) return;
+  window.parent.postMessage(msg, '*');
+}
+
 // ── Boot ─────────────────────────────────────────────────
 async function boot() {
+  if (EMBED) document.body.classList.add('embed-mode');
   await init();
   renderer = new HDRRenderer($<HTMLCanvasElement>('#canvas'));
   scopeCtx = $<HTMLCanvasElement>('#scope-canvas').getContext('2d')!;
@@ -73,7 +89,7 @@ async function boot() {
   offset.onUpdate = () => { params.offset = offset.values; renderAndHist(); };
 
   wireToolbar();
-  wireTimeline();
+  if (!EMBED) wireTimeline();  // embed mode wires the scrubber lazily in setupSequence()
   wirePanel();
   wireScopeTabs();
   wirePanelToggle();
@@ -81,7 +97,223 @@ async function boot() {
   wireCompare();
   wirePixelInspector($<HTMLCanvasElement>('#canvas'));
 
-  await loadFrame(currentClip.id, currentFrame);
+  if (EMBED) {
+    wireEmbedHost();
+    $<HTMLElement>('.loading').textContent = 'Waiting for image from host…';
+    postToHost({ type: 'gear:ready' });
+  } else {
+    await loadFrame(currentClip.id, currentFrame);
+  }
+}
+
+// ── Embed: inbound postMessage + param sync ──────────────
+function wireEmbedHost() {
+  window.addEventListener('message', async (ev) => {
+    const msg = ev.data;
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type === 'gear:load_exr' && msg.buffer instanceof ArrayBuffer) {
+      await loadExrBuffer(new Uint8Array(msg.buffer));
+    } else if (msg.type === 'gear:load_exr_sequence' && Array.isArray(msg.urls)) {
+      await setupSequence(msg.urls, msg.sdrUrls);
+    } else if (msg.type === 'gear:load_sdr' && msg.buffer instanceof ArrayBuffer) {
+      await loadSDRBuffer(new Uint8Array(msg.buffer), msg.mime || 'image/png');
+    } else if (msg.type === 'gear:set_params' && msg.params) {
+      applyParamsToUI(msg.params, msg.wheels);
+    } else if (msg.type === 'gear:reset') {
+      resetAll();
+    }
+  });
+}
+
+// ── Embed: batch / sequence navigation ──────────────────
+// When the host passes multiple EXRs (a ComfyUI batch of N images),
+// re-enable the bottom timeline as a frame scrubber that decodes on
+// demand from the provided URLs. Single-image loads skip this and use
+// `gear:load_exr` with a direct buffer transfer.
+let sequenceUrls: string[] = [];
+let sequenceSdrUrls: string[] | null = null;
+let currentSeqIndex = 0;
+let seqLoadToken = 0;  // cancels in-flight decodes when user scrubs fast
+
+async function setupSequence(urls: string[], sdrUrls?: string[] | null) {
+  sequenceUrls = urls;
+  sequenceSdrUrls = (sdrUrls && Array.isArray(sdrUrls) && sdrUrls.length) ? sdrUrls : null;
+  currentSeqIndex = 0;
+  if (!urls.length) return;
+
+  if (urls.length === 1) {
+    // Degenerate "sequence" of 1: keep timeline hidden, fetch + load directly.
+    await loadSequenceFrame(0);
+    return;
+  }
+
+  document.body.classList.add('embed-seq');  // CSS re-enables .timeline
+
+  const fs = $<HTMLInputElement>('#frame-slider');
+  fs.min = '0';
+  fs.max = String(urls.length - 1);
+  fs.step = '1';
+  fs.value = '0';
+  $<HTMLElement>('#tl-start').textContent = '0';
+  $<HTMLElement>('#tl-end').textContent = String(urls.length - 1);
+  $<HTMLElement>('#frame-num').textContent = '0';
+
+  fs.oninput = () => {
+    currentSeqIndex = +fs.value;
+    $<HTMLElement>('#frame-num').textContent = String(currentSeqIndex);
+  };
+  fs.onchange = () => {
+    loadSequenceFrame(+fs.value);
+  };
+
+  await loadSequenceFrame(0);
+}
+
+async function loadSequenceFrame(i: number) {
+  const url = sequenceUrls[i];
+  if (!url) return;
+  const token = ++seqLoadToken;
+  const ov = $<HTMLElement>('.loading');
+  ov.classList.remove('hidden');
+  ov.textContent = 'Fetching…';
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    if (token !== seqLoadToken) return;  // superseded by a newer scrub
+    currentSeqIndex = i;
+    await loadExrBuffer(buf);
+    // If host provided per-frame SDR, swap it in too so A|B compare works
+    // across the whole sequence.
+    if (sequenceSdrUrls && sequenceSdrUrls[i]) {
+      try {
+        const sdrResp = await fetch(sequenceSdrUrls[i]);
+        if (sdrResp.ok && token === seqLoadToken) {
+          const sdrBytes = new Uint8Array(await sdrResp.arrayBuffer());
+          await loadSDRBuffer(sdrBytes, 'image/png');
+        }
+      } catch { /* SDR is best-effort */ }
+    }
+  } catch (e) {
+    ov.textContent = `Error: ${(e as Error).message}`;
+  }
+}
+
+async function loadSDRBuffer(bytes: Uint8Array, mime: string) {
+  const blob = new Blob([bytes.slice().buffer], { type: mime });
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = new Image();
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('SDR image decode failed'));
+      img.src = url;
+    });
+    renderer.uploadSDR(img);
+    const sx = imgW / img.naturalWidth;
+    const sy = imgH / img.naturalHeight;
+    const ox = (1 - sx) / 2;
+    const oy = (1 - sy) / 2;
+    renderer.sdrCrop = [sx, sy, ox, oy];
+    requestAnimationFrame(() => renderAndHist());
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function loadExrBuffer(bytes: Uint8Array) {
+  const ov = $<HTMLElement>('.loading');
+  ov.classList.remove('hidden');
+  ov.textContent = 'Decoding…';
+  await new Promise(r => setTimeout(r, 0));
+  try {
+    const t0 = performance.now();
+    const dec = decodeRgbExr(bytes);
+    const dt = (performance.now() - t0).toFixed(0);
+    rgbData = dec.interleavedRgbPixels;
+    imgW = dec.width; imgH = dec.height;
+    renderer.uploadImage(rgbData, imgW, imgH);
+    // Render inside rAF so the GL draw lands in the next compositor pass.
+    // Without this, the draw happens in a macrotask that the compositor
+    // may skip — the canvas stays black until *some* subsequent event
+    // (e.g. a slider move) forces a re-render in a compositor-synced frame.
+    requestAnimationFrame(() => renderAndHist());
+    $<HTMLElement>('#info-res').textContent = `${imgW}×${imgH}`;
+    $<HTMLElement>('#info-decode').textContent = `${dt} ms`;
+    ov.classList.add('hidden');
+  } catch (e) {
+    ov.textContent = `Error: ${(e as Error).message}`;
+  }
+}
+
+interface WheelStates {
+  lift?:   { dx?: number; dy?: number; master?: number };
+  gamma?:  { dx?: number; dy?: number; master?: number };
+  gain?:   { dx?: number; dy?: number; master?: number };
+  offset?: { dx?: number; dy?: number; master?: number };
+}
+
+/**
+ * Apply a params object to UI controls without re-emitting params_changed
+ * back to the host. Tolerant: only keys present in `p` are applied.
+ *
+ * If `wheelStates` is provided, restore exact wheel dot + master position;
+ * otherwise fall back to lossy rgb-only restoration via setValues().
+ */
+function applyParamsToUI(p: Partial<RenderParams>, wheelStates?: WheelStates) {
+  applyingRemoteParams = true;
+  try {
+    if (p.exposure != null) {
+      params.exposure = p.exposure;
+      $<HTMLInputElement>('#sl-exposure').value = String(p.exposure);
+      $<HTMLInputElement>('#tb-ev').value = p.exposure.toFixed(2);
+      $<HTMLElement>('#ev-reset').classList.toggle('show', Math.abs(p.exposure) > 0.001);
+    }
+    if (p.toneMapping != null) {
+      params.toneMapping = p.toneMapping;
+      $<HTMLSelectElement>('#tm-select').value = String(p.toneMapping);
+    }
+    const scalarMap: Array<[keyof RenderParams, string]> = [
+      ['softClip', '#sl-softclip'],
+      ['contrast', '#sl-contrast'],
+      ['pivot', '#sl-pivot'],
+      ['shadows', '#sl-shadows'],
+      ['highlights', '#sl-highlights'],
+      ['temperature', '#sl-temperature'],
+      ['tint', '#sl-tint'],
+      ['saturation', '#sl-saturation'],
+      ['vibrance', '#sl-vibrance'],
+      ['hueShift', '#sl-hueshift'],
+    ];
+    for (const [key, sel] of scalarMap) {
+      const v = p[key] as number | undefined;
+      if (v == null) continue;
+      (params as any)[key] = v;
+      setSlider(sel, v);
+    }
+    // Prefer full wheel state (exact restoration) over rgb-only (lossy).
+    if (wheelStates?.lift)   wheels.lift.setState(wheelStates.lift);
+    else if (p.lift)         wheels.lift.setValues([...p.lift] as [number,number,number]);
+    if (wheelStates?.gamma)  wheels.gamma.setState(wheelStates.gamma);
+    else if (p.gamma)        wheels.gamma.setValues([...p.gamma] as [number,number,number]);
+    if (wheelStates?.gain)   wheels.gain.setState(wheelStates.gain);
+    else if (p.gain)         wheels.gain.setValues([...p.gain] as [number,number,number]);
+    if (wheelStates?.offset) wheels.offset.setState(wheelStates.offset);
+    else if (p.offset)       wheels.offset.setValues([...p.offset] as [number,number,number]);
+    // Sync params.* to whatever the wheels now produce (setState recomputes).
+    params.lift   = wheels.lift.values;
+    params.gamma  = wheels.gamma.values;
+    params.gain   = wheels.gain.values;
+    params.offset = wheels.offset.values;
+    if (p.falseColor != null) {
+      params.falseColor = !!p.falseColor;
+      $<HTMLInputElement>('#fc-check').checked = params.falseColor;
+      $<HTMLElement>('.fc-legend').classList.toggle('show', params.falseColor);
+    }
+    requestAnimationFrame(() => renderAndHist());
+  } finally {
+    applyingRemoteParams = false;
+  }
 }
 
 // ── EXR loading ──────────────────────────────────────────
@@ -166,9 +398,25 @@ function loadSDR(clip: string, frame: number) {
 }
 
 // ── Render + scope ───────────────────────────────────────
+function getWheelStates() {
+  return {
+    lift:   wheels.lift.getState(),
+    gamma:  wheels.gamma.getState(),
+    gain:   wheels.gain.getState(),
+    offset: wheels.offset.getState(),
+  };
+}
+
 function renderAndHist() {
   if (!rgbData) return;
   renderer.render(params);
+  if (EMBED && !applyingRemoteParams) {
+    postToHost({
+      type: 'gear:params_changed',
+      params: structuredClone(params),
+      wheels: getWheelStates(),
+    });
+  }
   if (histRafId) return;
   histRafId = requestAnimationFrame(() => {
     histRafId = 0;
@@ -195,62 +443,63 @@ function drawScope() {
 // ══════════════════════════════════════════════════════════
 
 function wireToolbar() {
-  // Thumbnail clip picker
-  const trigger = $<HTMLButtonElement>('#clip-trigger');
-  const triggerThumb = $<HTMLImageElement>('#clip-trigger-thumb');
-  const triggerName = $<HTMLElement>('#clip-trigger-name');
-  const popup = $<HTMLElement>('#clip-popup');
-  const grid = $<HTMLElement>('#clip-grid');
+  // Thumbnail clip picker — only built in standalone mode. Embed mode has
+  // no clip catalog, and even hidden <img src=...> elements would issue
+  // (failing) HTTP requests for thumbnails the host doesn't serve.
+  if (!EMBED) {
+    const trigger = $<HTMLButtonElement>('#clip-trigger');
+    const triggerThumb = $<HTMLImageElement>('#clip-trigger-thumb');
+    const triggerName = $<HTMLElement>('#clip-trigger-name');
+    const popup = $<HTMLElement>('#clip-popup');
+    const grid = $<HTMLElement>('#clip-grid');
 
-  const thumbUrl = (id: string) => `${CLIP_BASE}/${id}/thumbnail.jpg`;
+    const thumbUrl = (id: string) => `${CLIP_BASE}/${id}/thumbnail.jpg`;
 
-  function updateTrigger() {
-    triggerThumb.src = thumbUrl(currentClip.id);
-    triggerName.textContent = currentClip.label;
-  }
-
-  function selectClip(i: number) {
-    currentClip = CLIPS[i];
-    const fs = $<HTMLInputElement>('#frame-slider');
-    fs.max = String(currentClip.frames - 1);
-    $<HTMLElement>('#tl-end').textContent = String(currentClip.frames - 1);
-    currentFrame = Math.min(currentFrame, currentClip.frames - 1);
-    fs.value = String(currentFrame);
-    $<HTMLElement>('#frame-num').textContent = String(currentFrame);
-    updateTrigger();
-    // update active state in grid
-    grid.querySelectorAll('.clip-item').forEach((el, idx) => {
-      el.classList.toggle('active', idx === i);
-    });
-    popup.classList.remove('open');
-    loadFrame(currentClip.id, currentFrame);
-  }
-
-  // Build grid
-  CLIPS.forEach((c, i) => {
-    const item = document.createElement('div');
-    item.className = 'clip-item' + (i === 0 ? ' active' : '');
-    item.innerHTML =
-      `<img class="clip-item-thumb" src="${thumbUrl(c.id)}" loading="lazy" alt=""/>` +
-      `<div class="clip-item-name">${c.label}</div>`;
-    item.addEventListener('click', () => selectClip(i));
-    grid.appendChild(item);
-  });
-  updateTrigger();
-
-  // Open / close popup
-  trigger.addEventListener('click', (e) => {
-    e.stopPropagation();
-    popup.classList.toggle('open');
-  });
-  document.addEventListener('click', (e) => {
-    if (!popup.contains(e.target as Node) && e.target !== trigger) {
-      popup.classList.remove('open');
+    function updateTrigger() {
+      triggerThumb.src = thumbUrl(currentClip.id);
+      triggerName.textContent = currentClip.label;
     }
-  });
-  window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') popup.classList.remove('open');
-  });
+
+    function selectClip(i: number) {
+      currentClip = CLIPS[i];
+      const fs = $<HTMLInputElement>('#frame-slider');
+      fs.max = String(currentClip.frames - 1);
+      $<HTMLElement>('#tl-end').textContent = String(currentClip.frames - 1);
+      currentFrame = Math.min(currentFrame, currentClip.frames - 1);
+      fs.value = String(currentFrame);
+      $<HTMLElement>('#frame-num').textContent = String(currentFrame);
+      updateTrigger();
+      grid.querySelectorAll('.clip-item').forEach((el, idx) => {
+        el.classList.toggle('active', idx === i);
+      });
+      popup.classList.remove('open');
+      loadFrame(currentClip.id, currentFrame);
+    }
+
+    CLIPS.forEach((c, i) => {
+      const item = document.createElement('div');
+      item.className = 'clip-item' + (i === 0 ? ' active' : '');
+      item.innerHTML =
+        `<img class="clip-item-thumb" src="${thumbUrl(c.id)}" loading="lazy" alt=""/>` +
+        `<div class="clip-item-name">${c.label}</div>`;
+      item.addEventListener('click', () => selectClip(i));
+      grid.appendChild(item);
+    });
+    updateTrigger();
+
+    trigger.addEventListener('click', (e) => {
+      e.stopPropagation();
+      popup.classList.toggle('open');
+    });
+    document.addEventListener('click', (e) => {
+      if (!popup.contains(e.target as Node) && e.target !== trigger) {
+        popup.classList.remove('open');
+      }
+    });
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') popup.classList.remove('open');
+    });
+  }
 
   // EV slider + number input + reset
   const evSlider = $<HTMLInputElement>('#sl-exposure');
