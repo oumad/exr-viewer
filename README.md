@@ -2,7 +2,7 @@
 
 A WebGL2 HDR EXR viewer for showcasing Lightricks' SDR→HDR pipeline. DaVinci Resolve-class color grading in the browser — color wheels, ACEScct grading space, scopes, 3D LUTs, SDR/HDR wipe compare.
 
-**Live demo**: https://oumoumad.github.io/exr-viewer/
+**Live demo**: https://oumad.github.io/exr-viewer/
 
 ## Features
 
