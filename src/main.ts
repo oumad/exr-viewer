@@ -560,6 +560,11 @@ function parseCube(text: string): { size: number; data: Float32Array } | null {
 
 function loadSDR(clip: string, frame: number) {
   const img = new Image();
+  // SDR is uploaded to a WebGL texture; a cross-origin image (prod clips come from
+  // the HuggingFace dataset) must be CORS-approved or texImage2D throws SecurityError
+  // and the SDR side renders black. HF sends ACAO:*, so anonymous CORS succeeds.
+  // Harmless for same-origin dev (/clips/...).
+  img.crossOrigin = 'anonymous';
   img.onload = () => {
     renderer.uploadSDR(img);
     // Compute crop mapping: HDR UVs [0,1] → center crop of SDR
