@@ -3,36 +3,74 @@ import { HDRRenderer, DEFAULT_PARAMS, type RenderParams } from './renderer';
 import { ColorWheel, computeHistogram, drawHistogram, drawParade } from './widgets';
 import './style.css';
 
-// ── Clip catalog (28 clips) ──────────────────────────────
+// ── Clip catalog ─────────────────────────────────────────
+// Categories: 'SDR→HDR' (28 source-video remasters), 'T2V' (prompt-only HDR
+// generation with the LTX 2.3 standard HDR LoRA), 'I2V' (raw photo → LogC3
+// PNG → image-conditioned HDR video with the same LoRA).
 const CLIPS = [
-  { id: 'dandelion_girl_sunset',      label: 'Dandelion Girl Sunset',      frames: 97  },
-  { id: 'airport_silhouettes_sunset', label: 'Airport Silhouettes Sunset', frames: 121 },
-  { id: 'ballerina_arch_spotlight',   label: 'Ballerina Arch Spotlight',   frames: 121 },
-  { id: 'ballerina_window_light',     label: 'Ballerina Window Light',     frames: 121 },
-  { id: 'ballerina_window_reach',     label: 'Ballerina Window Reach',     frames: 121 },
-  { id: 'big_ben_tower',              label: 'Big Ben Tower',              frames: 75  },
-  { id: 'boy_cozy_room_moody',        label: 'Boy Cozy Room Moody',        frames: 121 },
-  { id: 'carousel_night_glow',        label: 'Carousel Night Glow',        frames: 121 },
-  { id: 'cathedral_dome_light',       label: 'Cathedral Dome Light',       frames: 121 },
-  { id: 'cattle_meadow_backlit',      label: 'Cattle Meadow Backlit',      frames: 121 },
-  { id: 'city_highway_night',         label: 'City Highway Night',         frames: 121 },
-  { id: 'city_rooftops_aerial',       label: 'City Rooftops Aerial',       frames: 121 },
-  { id: 'city_roundabout_night',      label: 'City Roundabout Night',      frames: 121 },
-  { id: 'dancer_blue_studio',         label: 'Dancer Blue Studio',         frames: 121 },
-  { id: 'driver_golden_hour_car',     label: 'Driver Golden Hour Car',     frames: 121 },
-  { id: 'dusk_field_clouds',          label: 'Dusk Field Clouds',          frames: 121 },
-  { id: 'forest_stream_golden',       label: 'Forest Stream Golden',       frames: 121 },
-  { id: 'girls_bokeh_picnic',         label: 'Girls Bokeh Picnic',         frames: 57  },
-  { id: 'golden_street_tower',        label: 'Golden Street Tower',        frames: 121 },
-  { id: 'greek_alley_flowers',        label: 'Greek Alley Flowers',        frames: 121 },
-  { id: 'horse_pasture_silhouette',   label: 'Horse Pasture Silhouette',   frames: 121 },
-  { id: 'lakeside_arches_vista',      label: 'Lakeside Arches Vista',      frames: 121 },
-  { id: 'misty_mountains_sunrise',    label: 'Misty Mountains Sunrise',    frames: 121 },
-  { id: 'mountain_road_canyon',       label: 'Mountain Road Canyon',       frames: 121 },
-  { id: 'mountain_sunrise_portrait',  label: 'Mountain Sunrise Portrait',  frames: 121 },
-  { id: 'neon_dancer_club',           label: 'Neon Dancer Club',           frames: 121 },
-  { id: 'night_vendor_cart',          label: 'Night Vendor Cart',          frames: 121 },
-  { id: 'river_cascade_sunlit',       label: 'River Cascade Sunlit',       frames: 121 },
+  // ── SDR → HDR remasters ─────────────────────────
+  { id: 'dandelion_girl_sunset',      label: 'Dandelion Girl Sunset',      frames: 97,  category: 'SDR→HDR' },
+  { id: 'airport_silhouettes_sunset', label: 'Airport Silhouettes Sunset', frames: 121, category: 'SDR→HDR' },
+  { id: 'ballerina_arch_spotlight',   label: 'Ballerina Arch Spotlight',   frames: 121, category: 'SDR→HDR' },
+  { id: 'ballerina_window_light',     label: 'Ballerina Window Light',     frames: 121, category: 'SDR→HDR' },
+  { id: 'ballerina_window_reach',     label: 'Ballerina Window Reach',     frames: 121, category: 'SDR→HDR' },
+  { id: 'big_ben_tower',              label: 'Big Ben Tower',              frames: 75,  category: 'SDR→HDR' },
+  { id: 'boy_cozy_room_moody',        label: 'Boy Cozy Room Moody',        frames: 121, category: 'SDR→HDR' },
+  { id: 'carousel_night_glow',        label: 'Carousel Night Glow',        frames: 121, category: 'SDR→HDR' },
+  { id: 'cathedral_dome_light',       label: 'Cathedral Dome Light',       frames: 121, category: 'SDR→HDR' },
+  { id: 'cattle_meadow_backlit',      label: 'Cattle Meadow Backlit',      frames: 121, category: 'SDR→HDR' },
+  { id: 'city_highway_night',         label: 'City Highway Night',         frames: 121, category: 'SDR→HDR' },
+  { id: 'city_rooftops_aerial',       label: 'City Rooftops Aerial',       frames: 121, category: 'SDR→HDR' },
+  { id: 'city_roundabout_night',      label: 'City Roundabout Night',      frames: 121, category: 'SDR→HDR' },
+  { id: 'dancer_blue_studio',         label: 'Dancer Blue Studio',         frames: 121, category: 'SDR→HDR' },
+  { id: 'driver_golden_hour_car',     label: 'Driver Golden Hour Car',     frames: 121, category: 'SDR→HDR' },
+  { id: 'dusk_field_clouds',          label: 'Dusk Field Clouds',          frames: 121, category: 'SDR→HDR' },
+  { id: 'forest_stream_golden',       label: 'Forest Stream Golden',       frames: 121, category: 'SDR→HDR' },
+  { id: 'girls_bokeh_picnic',         label: 'Girls Bokeh Picnic',         frames: 57,  category: 'SDR→HDR' },
+  { id: 'golden_street_tower',        label: 'Golden Street Tower',        frames: 121, category: 'SDR→HDR' },
+  { id: 'greek_alley_flowers',        label: 'Greek Alley Flowers',        frames: 121, category: 'SDR→HDR' },
+  { id: 'horse_pasture_silhouette',   label: 'Horse Pasture Silhouette',   frames: 121, category: 'SDR→HDR' },
+  { id: 'lakeside_arches_vista',      label: 'Lakeside Arches Vista',      frames: 121, category: 'SDR→HDR' },
+  { id: 'misty_mountains_sunrise',    label: 'Misty Mountains Sunrise',    frames: 121, category: 'SDR→HDR' },
+  { id: 'mountain_road_canyon',       label: 'Mountain Road Canyon',       frames: 121, category: 'SDR→HDR' },
+  { id: 'mountain_sunrise_portrait',  label: 'Mountain Sunrise Portrait',  frames: 121, category: 'SDR→HDR' },
+  { id: 'neon_dancer_club',           label: 'Neon Dancer Club',           frames: 121, category: 'SDR→HDR' },
+  { id: 'night_vendor_cart',          label: 'Night Vendor Cart',          frames: 121, category: 'SDR→HDR' },
+  { id: 'river_cascade_sunlit',       label: 'River Cascade Sunlit',       frames: 121, category: 'SDR→HDR' },
+  // ── Text-to-Video (HDR LoRA, prompt only) ───────
+  { id: 'skyline_sunset',             label: 'City Skyline Sunset',        frames: 121, category: 'T2V' },
+  { id: 'desert_golden_hour',         label: 'Desert Golden Hour',         frames: 121, category: 'T2V' },
+  { id: 'mountain_sunrise',           label: 'Mountain Sunrise Peaks',     frames: 121, category: 'T2V' },
+  { id: 'cyberpunk_rain',             label: 'Cyberpunk Rain Neon',        frames: 121, category: 'T2V' },
+  { id: 'cozy_window_daylight',       label: 'Cozy Living Room Window',    frames: 121, category: 'T2V' },
+  { id: 'window_snowy_outside',       label: 'Dark Room Snow Window',      frames: 121, category: 'T2V' },
+  { id: 'rustic_kitchen_sunrise',     label: 'Rustic Kitchen Sunrise',     frames: 121, category: 'T2V' },
+  { id: 'abandoned_house_rays',       label: 'Abandoned House Light Rays', frames: 121, category: 'T2V' },
+  { id: 'night_street_headlights',    label: 'Night Street Headlights',    frames: 121, category: 'T2V' },
+  { id: 'concert_stage_spotlights',   label: 'Concert Stage Spotlights',   frames: 121, category: 'T2V' },
+  { id: 'fireworks_water',            label: 'Fireworks Over Water',       frames: 121, category: 'T2V' },
+  { id: 'lantern_festival',           label: 'Lantern Festival',           frames: 121, category: 'T2V' },
+  { id: 'blacksmith_forge',           label: 'Blacksmith Forge',           frames: 121, category: 'T2V' },
+  { id: 'forest_god_rays',            label: 'Forest God Rays',            frames: 121, category: 'T2V' },
+  { id: 'neon_alley_steam',           label: 'Neon Alley Steam',           frames: 121, category: 'T2V' },
+  { id: 'lamp_window_temp',           label: 'Lamp + Window Color Temp',   frames: 121, category: 'T2V' },
+  { id: 'office_fluorescent',         label: 'Office Fluorescent',         frames: 121, category: 'T2V' },
+  { id: 'bathroom_mirror',            label: 'Bathroom Mirror Lights',     frames: 121, category: 'T2V' },
+  { id: 'subway_platform',            label: 'Subway Platform',            frames: 121, category: 'T2V' },
+  // ── Image-to-Video (raw photo → LogC3 PNG → HDR LoRA + LogC3 decode) ──
+  { id: 'dsc08348',                   label: 'Temple Elephant Procession', frames: 121, category: 'I2V' },
+  { id: 'dsc01108',                   label: 'Chinese Temple Incense',     frames: 121, category: 'I2V' },
+  { id: 'dsc02467',                   label: 'Old Town Pavilion',          frames: 121, category: 'I2V' },
+  { id: 'dsc01021',                   label: 'Tropical Palms Lily Pond',   frames: 121, category: 'I2V' },
+  { id: 'dsc0153',                    label: 'Mountain Ridge Sunset',      frames: 121, category: 'I2V' },
+  { id: 'dsc0166',                    label: 'Mountain Summit Clouds',     frames: 121, category: 'I2V' },
+  { id: 'dsc00326',                   label: 'Waterfall Yellow Raincoat',  frames: 121, category: 'I2V' },
+  { id: 'dsc_0108',                   label: 'Window Light Lighter',       frames: 121, category: 'I2V' },
+  { id: 'ryn03000',                   label: 'Photographer Sunset Peaks',  frames: 121, category: 'I2V' },
+  { id: 'tag_ryan_photography_tag',   label: 'Chiaroscuro Denim Portrait', frames: 121, category: 'I2V' },
+  { id: 'dsc02200',                   label: 'Thai Temple Pavilion',       frames: 121, category: 'I2V' },
+  { id: 'dsc00830',                   label: 'Window Gold Leaf Buddha',    frames: 121, category: 'I2V' },
+  { id: 'dsc00107',                   label: 'Temple Candles Incense',     frames: 121, category: 'I2V' },
 ] as const;
 
 // ── State ────────────────────────────────────────────────
@@ -241,6 +279,7 @@ async function loadExrBuffer(bytes: Uint8Array) {
     // (e.g. a slider move) forces a re-render in a compositor-synced frame.
     requestAnimationFrame(() => renderAndHist());
     $<HTMLElement>('#info-res').textContent = `${imgW}×${imgH}`;
+    showExrDepth(bytes, rgbData, imgW, imgH);
     $<HTMLElement>('#info-decode').textContent = `${dt} ms`;
     ov.classList.add('hidden');
   } catch (e) {
@@ -318,6 +357,139 @@ function applyParamsToUI(p: Partial<RenderParams>, wheelStates?: WheelStates) {
   }
 }
 
+// Read the channel pixel type straight from the EXR header, so the reported
+// bit depth reflects the actual file rather than an assumption. exrs' decoder
+// hands back only {width,height,pixels} and drops the pixel type, so we sniff
+// the header ourselves. Returns null for non-EXR / unparseable input.
+// pixelType per the OpenEXR spec: 0=UINT (32b), 1=HALF (16b), 2=FLOAT (32b).
+function exrChannelDepth(bytes: Uint8Array): { label: string; detail: string } | null {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (bytes.length < 8 || dv.getUint32(0, true) !== 20000630) return null;  // bad magic
+  let p = 8;  // skip 4-byte magic + 4-byte version field
+  const readStr = (limit: number): string => {
+    let s = '';
+    while (p < limit && bytes[p] !== 0) s += String.fromCharCode(bytes[p++]);
+    p++;  // consume null terminator
+    return s;
+  };
+  while (p < bytes.length) {
+    const name = readStr(bytes.length);
+    if (!name) break;  // empty name = end of header
+    const type = readStr(bytes.length);
+    const size = dv.getInt32(p, true); p += 4;
+    const end = p + size;
+    if (name === 'channels' && type === 'chlist') {
+      let maxType = -1, count = 0;
+      while (p < end) {
+        let cname = '';
+        while (p < end && bytes[p] !== 0) cname += String.fromCharCode(bytes[p++]);
+        p++;
+        if (!cname) break;  // empty name = end of channel list
+        maxType = Math.max(maxType, dv.getInt32(p, true)); p += 4;
+        p += 4 + 8;  // pLinear + 3 reserved, then xSampling + ySampling
+        count++;
+      }
+      if (maxType < 0) return null;
+      const bits = maxType === 1 ? 16 : 32;
+      const label = maxType === 1 ? '16-bit half' : maxType === 2 ? '32-bit float' : '32-bit uint';
+      const kind  = maxType === 1 ? 'half-float' : maxType === 2 ? 'float' : 'uint';
+      return { label, detail: `${bits}-bit ${kind} per channel · ${count}×${bits} = ${count * bits} bpp` };
+    }
+    p = end;  // not the channels attr — skip its value
+  }
+  return null;
+}
+
+// Float32 → IEEE half-float bit pattern. Used to count how many of the
+// container's 16-bit levels the signal actually occupies (its *effective*
+// depth) — the bit pattern collapses sub-half noise and caps the count at the
+// container, so the estimate can't exceed what the file can hold.
+const _f32buf = new Float32Array(1);
+const _i32buf = new Int32Array(_f32buf.buffer);
+function f16bits(val: number): number {
+  _f32buf[0] = val;
+  const x = _i32buf[0];
+  const sign = (x >>> 16) & 0x8000;
+  let exp = (x >>> 23) & 0xff;
+  let mant = x & 0x007fffff;
+  if (exp === 0xff) return sign | 0x7c00 | (mant ? 0x200 : 0);  // inf / nan
+  exp = exp - 127 + 15;
+  if (exp >= 31) return sign | 0x7c00;                           // overflow → inf
+  if (exp <= 0) {                                                // subnormal / underflow
+    if (exp < -10) return sign;
+    mant = (mant | 0x00800000) >> (1 - exp);
+    return sign | (mant >> 13);
+  }
+  return sign | (exp << 10) | (mant >> 13);
+}
+
+// Measure the tonal information the model actually produced, from the decoded
+// linear buffer. "Effective bits" = log2(distinct half-levels occupied) — a
+// pure tone curve over 8-bit input couldn't exceed 8; spatial synthesis pushes
+// it toward the container ceiling. "stops" = how far highlights reach past SDR
+// white (luminance 1.0), read off a robust p99.9 percentile.
+function analyzeHdrDepth(rgb: Float32Array | null, n: number):
+    { effBits: number; bitsGained: number; stops: number; distinct: number } | null {
+  if (!rgb || n <= 0) return null;
+  // Distinct-level counts are biased low under subsampling, so process every
+  // pixel up to ~4M (these frames are ~2M → stride 1); only very large frames
+  // get strided. This is a full-image pass — callers run it deferred.
+  const stride = Math.max(1, Math.floor(n / 4_000_000));
+  const pres = [new Uint8Array(65536), new Uint8Array(65536), new Uint8Array(65536)];
+  const BINS = 256, LO = -12, HI = 12, SPAN = HI - LO;   // log2-luminance histogram
+  const BSCALE = BINS / SPAN;
+  const lh = new Uint32Array(BINS); let lcount = 0;
+  for (let i = 0; i < n; i += stride) {
+    const o = i * 3;
+    const r = rgb[o], g = rgb[o + 1], b = rgb[o + 2];
+    pres[0][f16bits(r)] = 1; pres[1][f16bits(g)] = 1; pres[2][f16bits(b)] = 1;
+    const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    if (lum > 0) {
+      // cheap log2 via the float exponent + linear-interpolated mantissa
+      // (≤0.086 error — well under one 0.094-stop bin); avoids Math.log2.
+      _f32buf[0] = lum;
+      const xb = _i32buf[0];
+      const log2lum = (((xb >>> 23) & 0xff) - 127) + (xb & 0x7fffff) / 0x800000;
+      let bi = ((log2lum - LO) * BSCALE) | 0;
+      if (bi < 0) bi = 0; else if (bi >= BINS) bi = BINS - 1;
+      lh[bi]++; lcount++;
+    }
+  }
+  const count = (p: Uint8Array) => { let c = 0; for (let i = 0; i < 65536; i++) c += p[i]; return c; };
+  const d = [count(pres[0]), count(pres[1]), count(pres[2])].sort((a, b) => a - b);
+  const distinct = d[1];                          // median channel — conservative
+  const effBits = Math.log2(Math.max(distinct, 1));
+  let acc = 0; const thr = lcount * 0.999; let pbin = BINS - 1;
+  for (let i = 0; i < BINS; i++) { acc += lh[i]; if (acc >= thr) { pbin = i; break; } }
+  const stops = Math.max(0, LO + ((pbin + 0.5) / BINS) * SPAN);
+  return { effBits, bitsGained: effBits - 8, stops, distinct };
+}
+
+let _depthToken = 0;
+function showExrDepth(bytes: Uint8Array, rgb: Float32Array | null, w: number, h: number) {
+  const d = exrChannelDepth(bytes);
+  const el = $<HTMLElement>('#info-depth');
+  if (!d) { el.textContent = ''; el.title = ''; return; }
+  // Container label is free (header sniff) — show it immediately.
+  el.textContent = d.label;
+  el.title = d.detail;
+  // The effective-depth estimate is a full-image pass (~70ms). Run it off the
+  // decode path and cancel if a newer frame arrives, so scrubbing stays smooth
+  // and only the frame the user lands on pays the cost.
+  const tok = ++_depthToken;
+  setTimeout(() => {
+    if (tok !== _depthToken) return;            // superseded by a newer frame
+    const a = analyzeHdrDepth(rgb, w * h);
+    if (tok !== _depthToken || !a) return;
+    el.textContent = `${d.label} · ~${Math.round(a.effBits)}-bit effective`;
+    el.title =
+      `Container: ${d.detail}\n` +
+      `Measured (live): 8-bit SDR in → ~${a.effBits.toFixed(1)}-bit out\n` +
+      `+${a.bitsGained.toFixed(1)} bits tonal detail vs 8-bit · +${a.stops.toFixed(1)} stops over SDR white\n` +
+      `${a.distinct.toLocaleString()} distinct levels/channel`;
+  }, 50);
+}
+
 // ── EXR loading ──────────────────────────────────────────
 // In dev: /clips/ is served by Vite middleware from ../clips/.
 // In prod: Vite injects VITE_CLIP_BASE_URL (e.g. HuggingFace dataset URL).
@@ -351,6 +523,7 @@ async function loadFrame(clip: string, frame: number) {
     resetView($<HTMLCanvasElement>('#canvas'));  // standalone clip browser also fits each new frame
     renderAndHist();
     $<HTMLElement>('#info-res').textContent = `${imgW}\u00d7${imgH}`;
+    showExrDepth(buf, rgbData, imgW, imgH);
     $<HTMLElement>('#info-decode').textContent = `${dt} ms`;
     // load SDR counterpart if compare is on
     if (compareOn) loadSDR(clip, frame);
@@ -479,7 +652,16 @@ function wireToolbar() {
       loadFrame(currentClip.id, currentFrame);
     }
 
+    let prevCategory: string | null = null;
     CLIPS.forEach((c, i) => {
+      // Category header — emitted once per category transition.
+      if (c.category !== prevCategory) {
+        const header = document.createElement('div');
+        header.className = 'clip-category';
+        header.textContent = c.category;
+        grid.appendChild(header);
+        prevCategory = c.category;
+      }
       const item = document.createElement('div');
       item.className = 'clip-item' + (i === 0 ? ' active' : '');
       item.innerHTML =
